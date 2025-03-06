@@ -1,0 +1,90 @@
+import backtrader as bt
+import pandas as pd
+import ta
+import ccxt
+import datetime
+
+# Initialize the exchange (for live data fetching)
+exchange = ccxt.binance({
+    'apiKey': 'your_api_key',
+    'secret': 'your_api_secret'
+})
+
+# Fetch historical data (OHLCV)
+def get_historical_data(symbol, timeframe='1m', since=None):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
+
+# Create Backtrader strategy
+class ScalpingStrategy(bt.Strategy):
+    # Define parameters
+    params = (
+        ('stop_loss_pct', 0.002),   # 0.2% stop-loss
+        ('take_profit_pct', 0.005), # 0.5% take-profit
+        ('rsi_period', 14),         # RSI period
+        ('rsi_overbought', 70),     # RSI overbought threshold
+        ('rsi_oversold', 30),       # RSI oversold threshold
+        ('ma_short_period', 50),    # Short MA period (50)
+        ('ma_long_period', 200),    # Long MA period (200)
+    )
+    
+    def __init__(self):
+        # Add technical indicators
+        self.ma_short = bt.indicators.SimpleMovingAverage(self.data.close, period=self.p.ma_short_period)
+        self.ma_long = bt.indicators.SimpleMovingAverage(self.data.close, period=self.p.ma_long_period)
+        self.rsi = bt.indicators.RelativeStrengthIndex(period=self.p.rsi_period)
+    
+    def next(self):
+        if self.position:
+            # Check for exit condition
+            if self.data.close[0] <= self.position.price * (1 - self.p.stop_loss_pct) or \
+               self.data.close[0] >= self.position.price * (1 + self.p.take_profit_pct):
+                self.close()
+                return
+
+        # Buy signal: when short MA crosses above long MA and RSI is not overbought
+        if self.ma_short[0] > self.ma_long[0] and self.rsi[0] < self.p.rsi_oversold:
+            if not self.position:
+                self.buy()
+
+        # Sell signal: when short MA crosses below long MA and RSI is not oversold
+        elif self.ma_short[0] < self.ma_long[0] and self.rsi[0] > self.p.rsi_overbought:
+            if not self.position:
+                self.sell()
+
+# Convert historical data into Backtrader format
+def create_backtrader_data(df):
+    data = bt.feeds.PandasData(dataname=df)
+    return data
+
+# Backtesting function
+def backtest(symbol, timeframe='1m', start_date='2023-01-01', end_date='2023-03-01'):
+    # Get historical data
+    df = get_historical_data(symbol, timeframe)
+    df = df[(df['timestamp'] >= start_date) & (df['timestamp'] <= end_date)]
+
+    # Create Backtrader data feed
+    data = create_backtrader_data(df)
+
+    # Create Backtrader Cerebro engine
+    cerebro = bt.Cerebro()
+    cerebro.adddata(data)
+    cerebro.addstrategy(ScalpingStrategy)
+    cerebro.broker.set_cash(1000)  # Starting cash
+    cerebro.broker.set_sizer(bt.sizers.FixedSize, stake=1)  # Position size
+    cerebro.broker.set_commission(commission=0.001)  # Commission per trade
+
+    # Print starting cash
+    print(f"Starting Portfolio Value: {cerebro.broker.getvalue()}")
+
+    # Run the backtest
+    cerebro.run()
+
+    # Print final portfolio value
+    print(f"Ending Portfolio Value: {cerebro.broker.getvalue()}")
+
+if __name__ == '__main__':
+    # Run backtest with desired parameters
+    backtest('BTC/USDT', '1m', '2023-01-01', '2023-03-01')
